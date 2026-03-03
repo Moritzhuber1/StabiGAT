@@ -14,7 +14,7 @@ Note:
     data/adjacency/<name>_adjacency_matrix.npy
 
 How to run:
-    python stabi_gat_framework.py
+    python diff_cv.py
 
 You can also import and call run_all_experiments() from another script.
 """
