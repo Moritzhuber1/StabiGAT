@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """
-stabi_gat_framework.py
-
 A small, clean experiment framework to compare 3 cross-validation strategies:
 
 1) StratifiedShuffleSplit (SSS)
