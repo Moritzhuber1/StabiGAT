@@ -4,7 +4,7 @@ A small, clean experiment framework to compare 3 cross-validation strategies:
 
 1) StratifiedShuffleSplit (SSS)
 2) StratifiedKFold (SKF)
-3) GroupKFold (GKF) with clusters from mean-pooled ESM2 embeddings
+3) GroupKFold (GKF) with clusters from mmseqs2 grouping 
 
 
 Note:
