@@ -10,7 +10,7 @@
 
 ![figure1](figures/modell.jpg)
 
-## Idea 
+## The Idea 
 
 This project was conducted during my internship in the research group of Prof. Franziska Thomas at Heidelberg University.
 
@@ -26,10 +26,10 @@ In parallel, residue-level representations were generated using ESM2 protein lan
 
 ## Third-party licenses
 
-This code adapts code from the following third party libraries:
+This project uses the packages:
 
-- [pytorch_geometric](https://github.com/pytorch)
-- [scikit-learn](https://github.com/scikit-learn)
+- [pytorch_geometric](https://pytorch.org/get-started/locally/)
+- [scikit-learn](https://scikit-learn.org/stable/)
 
 <details>
   <summary>MIT License</summary>
