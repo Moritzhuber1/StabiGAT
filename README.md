@@ -12,7 +12,7 @@
 
 ## The Idea 
 
-This project was conducted during my internship in the research group of Prof. Franziska Thomas at Heidelberg University.
+This is a small side project that I developed in my free time and continue to work on whenever I have time.
 
 I implemented a graph neural network (GNN) to predict the thermostability of $\beta$-sheet peptides by integrating structural, sequence-based, and simulation-derived features. For each peptide, a 3D structure was first predicted using ColabFold and subsequently subjected to 30 ns molecular dynamics simulations in explicit solvent using GROMACS with the AMBER99SB-ILDN force field. From these simulations, multiple global stability descriptors were extracted, including RMSD, radius of gyration, solvent-accessible surface area (SASA), hydrogen-bond counts, Lennard–Jones contacts, and potential energy, capturing dynamic aspects of peptide stability.  
 
