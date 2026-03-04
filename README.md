@@ -18,9 +18,47 @@ I implemented a graph neural network (GNN) to predict the thermostability of $\b
 
 In parallel, residue-level representations were generated using ESM2 protein language model embeddings, providing contextual sequence information for each amino acid. Each peptide was then represented as a graph where nodes correspond to residues and edges were derived from an MD-based adjacency matrix reflecting persistent spatial contacts during the simulation. These local embeddings and global MD features were fused via a cross-attention mechanism and processed by multiple Graph Attention Network (GAT) layers to predict whether a peptide is thermally stable or unstable.
 
-## References 
+## References
 
+- Li, B., Yang, Y. T., Capra, J. A., & Gerstein, M. B. (2019).  
+  Predicting changes in protein thermodynamic stability upon point mutation with deep 3D convolutional neural networks.  
+  *Bioinformatics.*  
+  https://doi.org/10.1093/bioinformatics/btz028
 
+- Rodella, C., Lazaridi, S., & Lemmin, T. (2024).  
+  TemBERTure: Advancing protein thermostability prediction with deep learning and attention mechanisms.  
+  *Bioinformatics Advances.*  
+  https://doi.org/10.1093/bioadv/vbae090
+
+- Jung, F., et al. (2023).  
+  DeepSTABp: A Deep Learning Approach for the Prediction of Protein Thermal Stability.  
+  *International Journal of Molecular Sciences.*  
+  https://doi.org/10.3390/ijms24087444
+
+- Veličković, P., Cucurull, G., Casanova, A., Romero, A., Liò, P., & Bengio, Y. (2018).  
+  Graph Attention Networks.  
+  *International Conference on Learning Representations (ICLR).*  
+  https://arxiv.org/abs/1710.10903
+
+- Lin, Z., et al. (2023).  
+  Evolutionary-scale prediction of atomic-level protein structure with a language model.  
+  *Science.*  
+  https://doi.org/10.1126/science.ade2574
+
+- Mirdita, M., et al. (2022).  
+  ColabFold: making protein folding accessible to all.  
+  *Nature Methods.*  
+  https://doi.org/10.1038/s41592-022-01488-1
+
+- Abraham, M. J., et al. (2015).  
+  GROMACS: High performance molecular simulations through multi-level parallelism from laptops to supercomputers.  
+  *SoftwareX.*  
+  https://doi.org/10.1016/j.softx.2015.06.001
+
+- Lindorff-Larsen, K., et al. (2010).  
+  Improved side-chain torsion potentials for the Amber ff99SB protein force field.  
+  *Proteins: Structure, Function, and Bioinformatics.*  
+  https://doi.org/10.1002/prot.22711
 
 
 
