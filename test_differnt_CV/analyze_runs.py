@@ -209,19 +209,91 @@ def plot_leaderboard(df: pd.DataFrame, out_png: Path, metric: str, topn: int = 2
     plt.close()
 
 
-def plot_overfit_scatter(df: pd.DataFrame, out_png: Path) -> None:
+def plot_overfit_scatter(
+    df: pd.DataFrame,
+    out_png: Path,
+    label_top_n: int = 2,
+    label_by: str = "mean_f1",
+) -> None:
     """
     Scatter plot:
       x-axis: overfit gap (lower is better)
       y-axis: mean_f1 (higher is better)
-    """
-    d = df.dropna(subset=["gap_auc", "mean_f1"]).copy()
 
-    plt.figure(figsize=(10, 7))
-    plt.scatter(d["gap_auc"], d["mean_f1"])
-    plt.xlabel("Overfit gap: mean(val_loss - train_loss) over epochs (lower is better)")
-    plt.ylabel("mean_f1 (higher is better)")
-    plt.title("Overfitting vs Performance")
+    - Colors by cv_method (sss/skf/gkf)
+    - Labels the top-N runs by `label_by` (default mean_f1)
+    """
+    d = df.dropna(subset=["gap_auc", "mean_f1", "cv_method"]).copy()
+
+    # fixed marker colors per method (so plots are comparable across runs)
+    method_order = ["sss", "skf", "gkf"]
+    color_map = {"sss": "tab:blue", "skf": "tab:orange", "gkf": "tab:green"}
+
+    plt.figure(figsize=(12, 8))
+
+    # Plot per method
+    for m in method_order:
+        dm = d[d["cv_method"] == m]
+        if dm.empty:
+            continue
+        plt.scatter(
+            dm["gap_auc"],
+            dm["mean_f1"],
+            label=m,
+            alpha=0.85,
+            s=55,
+            c=color_map.get(m, None),
+            edgecolors="black",
+            linewidths=0.3,
+        )
+
+    # Label top-N runs (global, across methods)
+    # Make it robust if label_by has NaNs
+    #d2 = d.dropna(subset=[label_by]).sort_values(label_by, ascending=False).head(label_top_n)
+    #for _, r in d2.iterrows():
+    #    # Short label: method + key hparams
+    #    txt = (
+    #        f"{r['cv_method']} | cut={r['cut_off']}"
+    #        f" L={r['num_layers']} H={r['hidden_dim']}"
+    #    )
+    #    plt.annotate(
+    #        txt,
+    #        (r["gap_auc"], r["mean_f1"]),
+    #        textcoords="offset points",
+    #        xytext=(6, 6),
+    #        fontsize=9,
+    #        bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.8),
+    #    )
+
+    # Optional: mark the "Pareto front" (best trade-off: high F1, low gap)
+    # A point is Pareto-optimal if no other point has >=F1 and <=gap with one strict.
+    pts = d[["gap_auc", "mean_f1"]].to_numpy()
+    pareto = np.ones(len(pts), dtype=bool)
+    for i in range(len(pts)):
+        if not pareto[i]:
+            continue
+        gi, fi = pts[i]
+        dominates = (pts[:, 0] <= gi) & (pts[:, 1] >= fi) & ((pts[:, 0] < gi) | (pts[:, 1] > fi))
+        if np.any(dominates):
+            pareto[i] = False
+
+    pareto_df = d.loc[pareto]
+    if not pareto_df.empty:
+        plt.scatter(
+            pareto_df["gap_auc"],
+            pareto_df["mean_f1"],
+            s=140,
+            facecolors="none",
+            edgecolors="red",
+            linewidths=1.5,
+            label="pareto",
+        )
+
+    plt.xlabel("Overfit gap: mean(val_loss - train_loss) over epochs")
+    plt.ylabel("mean_f1")
+    #plt.title("Overfitting vs Performance (colored by CV method)")
+    #plt.grid(True, alpha=0.25)
+    plt.legend()
     plt.tight_layout()
     plt.savefig(out_png, dpi=300)
     plt.close()
@@ -286,8 +358,8 @@ def main() -> None:
         scores = compute_overfit_scores(lc)
         overfit_scores.append(scores)
 
-    overfit_df = pd.DataFrame(overfit_scores)
-    df = pd.concat([df.reset_index(drop=True), overfit_df.reset_index(drop=True)], axis=1)
+    overfit_df = pd.DataFrame(overfit_scores, index=df.index)
+    df = df.join(overfit_df)
 
     # Save the merged table
     out_csv = REPORT_DIR / "all_runs_table.csv"

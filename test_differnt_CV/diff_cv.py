@@ -28,11 +28,10 @@ import copy
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from itertools import product
-from typing import Dict, Iterable, Iterator, List, Optional, Protocol, Tuple
+from typing import Dict, Iterator, List, Optional, Protocol, Tuple
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
 import torch
 import torch.nn as nn
@@ -40,11 +39,12 @@ import torch.nn.functional as F
 from torch.nn import LayerNorm, Dropout
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import GATConv
+from torch_geometric.nn import GATConv, global_mean_pool
+from torch_geometric.utils import softmax as geometric_softmax
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import StratifiedShuffleSplit, StratifiedKFold, GroupKFold, GroupShuffleSplit
-from sklearn.cluster import AgglomerativeClustering
+from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
@@ -79,7 +79,7 @@ EMB_DIM = 1280
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Training defaults
-BATCH_SIZE = 1
+BATCH_SIZE = 8
 EPOCHS = 25
 LEARNING_RATE = 1e-4
 PATIENCE = 5
@@ -143,7 +143,7 @@ class ExperimentConfig:
 # =============================================================================
 
 class CrossAttention(nn.Module):
-    """Single-head cross-attention: queries = nodes, keys/values = molecule feature."""
+    """Single-head cross-attention: queries = nodes, keys/values = per-graph MD feature."""
 
     def __init__(self, node_dim: int, md_dim: int, hidden_dim: int) -> None:
         super().__init__()
@@ -152,16 +152,24 @@ class CrossAttention(nn.Module):
         self.value_proj = nn.Linear(md_dim, hidden_dim)
         self.out_proj = nn.Linear(hidden_dim, node_dim)
 
-    def forward(self, node_feats: torch.Tensor, md_feat: torch.Tensor) -> torch.Tensor:
-        Q = self.query_proj(node_feats)                 # (L, H)
-        K = self.key_proj(md_feat).unsqueeze(0)         # (1, H)
-        V = self.value_proj(md_feat).unsqueeze(0)       # (1, H)
+    def forward(
+        self,
+        node_feats: torch.Tensor,
+        md_feat: torch.Tensor,
+        batch_index: torch.Tensor,
+    ) -> torch.Tensor:
+        # node_feats: (N, node_dim)  — all nodes across the batch
+        # md_feat:    (B, md_dim)    — one vector per graph
+        # batch_index: (N,)          — graph index per node
+        Q = self.query_proj(node_feats)                          # (N, H)
+        K = self.key_proj(md_feat)[batch_index]                  # (N, H)
+        V = self.value_proj(md_feat)[batch_index]                # (N, H)
 
-        attn_scores = (Q @ K.T) / (Q.shape[-1] ** 0.5)  # (L, 1)
-        attn_weights = torch.softmax(attn_scores, dim=0) # (L, 1)
+        attn_scores = (Q * K).sum(dim=-1, keepdim=True) / (Q.size(-1) ** 0.5)  # (N, 1)
+        attn_weights = geometric_softmax(attn_scores, batch_index)              # per-graph softmax
 
-        attended = attn_weights * V                     # (L, H)
-        return self.out_proj(attended) + node_feats      # residual
+        attended = attn_weights * V                              # (N, H)
+        return self.out_proj(attended) + node_feats              # residual
 
 
 class GATI(nn.Module):
@@ -198,10 +206,13 @@ class GATI(nn.Module):
         )
 
     def forward(self, data: Data) -> torch.Tensor:
-        x, edge_index, edge_attr = data.x[:, :EMB_DIM], data.edge_index, data.edge_attr
-        md_feat = data.x[0, EMB_DIM:]  # (md_dim,)
+        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+        md_feat = data.md  # (B, md_dim)
+        batch_index = data.batch
+        if batch_index is None:
+            batch_index = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
 
-        x = self.cross_attn(x, md_feat)
+        x = self.cross_attn(x, md_feat, batch_index)
 
         for gat, norm, drop in zip(self.gat_layers, self.norm_layers, self.drop_layers):
             x = gat(x, edge_index, edge_attr)
@@ -209,7 +220,7 @@ class GATI(nn.Module):
             x = F.relu(x)
             x = drop(x)
 
-        graph_repr = x.mean(dim=0, keepdim=True)
+        graph_repr = global_mean_pool(x, batch_index)  # (B, hidden)
         return self.cls(graph_repr)
 
 
@@ -258,13 +269,11 @@ class GraphBuilder:
         edge_index = np.array(np.nonzero(mask))          # (2, E)
         edge_weight = A[mask].astype(np.float32)         # (E,)
 
-        md_repeated = np.tile(md_feat_scaled, (X.shape[0], 1))
-        X_combined = np.concatenate([X, md_repeated], axis=1)
-
         return Data(
-            x=torch.tensor(X_combined, dtype=torch.float32),
+            x=torch.tensor(X, dtype=torch.float32),
             edge_index=torch.tensor(edge_index, dtype=torch.long),
             edge_attr=torch.tensor(edge_weight, dtype=torch.float32).unsqueeze(1),
+            md=torch.tensor(md_feat_scaled, dtype=torch.float32).unsqueeze(0),
         )
 
     def build(
@@ -286,46 +295,6 @@ class GraphBuilder:
             out.append(g)
 
         return out
-
-
-# =============================================================================
-# Group / cluster building (Single Responsibility + caching)
-# =============================================================================
-
-class GroupAssigner:
-    """Builds groups from mean-pooled ESM embeddings and caches results."""
-
-    def __init__(self, emb_path: Path, cache_dir: Path) -> None:
-        self._emb_path = emb_path
-        self._cache_dir = cache_dir
-        self._mem_cache: Dict[int, np.ndarray] = {}
-
-    def _mean_pool_esm(self, name: str) -> np.ndarray:
-        X = np.load(self._emb_path / f"{name}.npy")  # (L, EMB_DIM)
-        return X.mean(axis=0)
-
-    def get_groups(self, df: pd.DataFrame, n_clusters: int) -> np.ndarray:
-        # 1) In-memory cache (fastest)
-        if n_clusters in self._mem_cache:
-            return self._mem_cache[n_clusters]
-
-        # 2) Disk cache (useful across runs)
-        cache_file = self._cache_dir / f"groups_clus{n_clusters}.npy"
-        if cache_file.exists():
-            groups = np.load(cache_file).astype(int)
-            self._mem_cache[n_clusters] = groups
-            return groups
-
-        # 3) Compute and store
-        pooled = np.vstack(
-            [self._mean_pool_esm(nm) for nm in tqdm(df["name"], desc=f"Mean-pool ESM (clus={n_clusters})")]
-        )
-        clustering = AgglomerativeClustering(n_clusters=n_clusters)
-        groups = clustering.fit_predict(pooled).astype(int)
-
-        np.save(cache_file, groups)
-        self._mem_cache[n_clusters] = groups
-        return groups
 
 
 # =============================================================================
@@ -494,7 +463,7 @@ class Trainer:
         Returns:
           - best_state_dict
           - fold_summary metrics
-          - training history dict (for CSV)
+          - extras dict with 'history', 'y_true', 'y_pred'
         """
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -505,8 +474,13 @@ class Trainer:
         model = GATI(md_dim=md_dim, cfg=model_cfg).to(DEVICE)
         opt = torch.optim.Adam(model.parameters(), lr=self._lr)
 
-        # You can adapt weights if the dataset is imbalanced.
-        class_weights = torch.tensor([1.0, 1.0], device=DEVICE)
+        y_train = np.array([int(g.y.item()) for g in train_graphs])
+        weights = compute_class_weight(
+            class_weight="balanced",
+            classes=np.array([0, 1]),
+            y=y_train,
+        )
+        class_weights = torch.tensor(weights, dtype=torch.float32, device=DEVICE)
 
         best_f1 = -1.0
         best_state: Optional[Dict[str, object]] = None
@@ -562,7 +536,7 @@ class Trainer:
         # Confusion matrix
         self._plot_cm(y_true, y_pred, out_dir / f"fold{fold_id}_cm.png")
 
-        return best_state, fold_row, {"history": history_rows}
+        return best_state, fold_row, {"history": history_rows, "y_true": y_true, "y_pred": y_pred}
 
     @staticmethod
     def _plot_cm(y_true: List[int], y_pred: List[int], out_path: Path) -> None:
@@ -584,11 +558,9 @@ class ExperimentRunner:
     def __init__(
         self,
         metadata_repo: MetadataRepository,
-        group_assigner: GroupAssigner,
         trainer: Trainer,
     ) -> None:
         self._metadata_repo = metadata_repo
-        self._group_assigner = group_assigner
         self._trainer = trainer
 
     def run(self, cfg: ExperimentConfig, base_dir: Path) -> Dict[str, float]:
@@ -609,16 +581,6 @@ class ExperimentRunner:
 
         df, md_raw, labels, feature_cols = self._metadata_repo.load()
         md_dim = len(feature_cols)
-
-        # Prepare groups only if needed
-        #groups: Optional[np.ndarray] = None
-        #if cfg.cv.method == "gkf":
-        #    if cfg.cv.n_clusters is None:
-        #        raise ValueError("cv.n_clusters is required for GroupKFold.")
-        #    if cfg.cv.n_clusters < cfg.cv.n_splits:
-        #        # Skip logic: cannot split into more folds than groups
-        #        raise ValueError(f"Invalid config: n_clusters={cfg.cv.n_clusters} < n_splits={cfg.cv.n_splits}")
-        #    groups = self._group_assigner.get_groups(df, cfg.cv.n_clusters)
 
         groups: Optional[np.ndarray] = None
         if cfg.cv.method == "gkf":
@@ -671,7 +633,7 @@ class ExperimentRunner:
             te_graphs = graph_builder.build(df, md_raw, te_idx, scaler)
 
             # Train on inner-train, early-stop on inner-val, report on outer-test
-            _, fold_row, _ = self._trainer.train_fold(
+            _, fold_row, extras = self._trainer.train_fold(
                 md_dim=md_dim,
                 model_cfg=cfg.model,
                 train_graphs=tr_graphs,
@@ -681,19 +643,8 @@ class ExperimentRunner:
                 fold_id=fold_id,
             )
 
-
-            # We rebuild y_true/y_pred from fold CM file? Better: compute here again quickly.
-            # But the trainer already computed y_true/y_pred. To keep things simple, we compute aggregated CM from fold_row only?
-            # We want real aggregated CM, so we do a lightweight eval here:
-            y_true, y_pred = self._predict_labels(
-                md_dim=md_dim,
-                model_cfg=cfg.model,
-                model_path=out_dir / f"model_fold{fold_id}.pt",
-                graphs=te_graphs,
-            )
-
-            all_y_true.extend(y_true)
-            all_y_pred.extend(y_pred)
+            all_y_true.extend(extras["y_true"])
+            all_y_pred.extend(extras["y_pred"])
 
             fold_metrics.append(
                 FoldMetrics(
@@ -741,32 +692,6 @@ class ExperimentRunner:
         plt.tight_layout()
         plt.savefig(out_path, dpi=dpi)
         plt.close()
-
-    @staticmethod
-    def _predict_labels(
-        md_dim: int,
-        model_cfg: ModelConfig,
-        model_path: Path,
-        graphs: List[Data],
-    ) -> Tuple[List[int], List[int]]:
-        """Loads saved weights and predicts labels for graphs."""
-        loader = DataLoader(graphs, batch_size=BATCH_SIZE, shuffle=False)
-        model = GATI(md_dim=md_dim, cfg=model_cfg).to(DEVICE)
-        state = torch.load(model_path, map_location=DEVICE)
-        model.load_state_dict(state)
-        model.eval()
-
-        y_true: List[int] = []
-        y_pred: List[int] = []
-        with torch.no_grad():
-            for b in loader:
-                b = b.to(DEVICE)
-                logits = model(b)
-                pred = logits.argmax(dim=1).cpu().numpy().tolist()
-                true = b.y.cpu().numpy().tolist()
-                y_true.extend(true)
-                y_pred.extend(pred)
-        return y_true, y_pred
 
     @staticmethod
     def _make_inner_split(
@@ -852,9 +777,8 @@ def run_all_experiments() -> None:
     Then enlarge it when everything works.
     """
     metadata_repo = MetadataRepository(CSV_PATH)
-    group_assigner = GroupAssigner(EMB_PATH, CACHE_DIR)
     trainer = Trainer(lr=LEARNING_RATE, epochs=EPOCHS, patience=PATIENCE)
-    runner = ExperimentRunner(metadata_repo, group_assigner, trainer)
+    runner = ExperimentRunner(metadata_repo, trainer)
 
     # Small example grid (expand as you want)
     cut_offs = [0.8, 0.5, 0.2]
